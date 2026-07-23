@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   clearStoredToken,
   consumeAuthErrorFromLocation,
@@ -13,9 +13,10 @@ import {
   setStoredClientId,
   validateToken,
 } from './twitch'
+import './App.css'
 
 const REFRESH_INTERVAL_MS = 60_000
-import './App.css'
+const NOTIFICATIONS_ENABLED_KEY = 'twitch_notifications_enabled'
 
 function ClientIdForm({ onSave }) {
   const [value, setValue] = useState('')
@@ -88,6 +89,18 @@ function StreamCard({ channel, stream, avatarUrl }) {
   )
 }
 
+function SkeletonCard() {
+  return (
+    <div className="channel-card skeleton">
+      <div className="thumbnail skeleton-block" />
+      <div className="channel-info">
+        <span className="skeleton-line skeleton-line-title" />
+        <span className="skeleton-line skeleton-line-sub" />
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [clientId, setClientId] = useState(getStoredClientId())
   const [user, setUser] = useState(null)
@@ -96,6 +109,18 @@ export default function App() {
   const [avatarsByUserId, setAvatarsByUserId] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [search, setSearch] = useState('')
+  const [gameFilter, setGameFilter] = useState('')
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    () => localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) === 'true',
+  )
+
+  const previousLiveIdsRef = useRef(null)
+  const notificationsEnabledRef = useRef(notificationsEnabled)
+  useEffect(() => {
+    notificationsEnabledRef.current = notificationsEnabled
+  }, [notificationsEnabled])
 
   const loadFollowedAndLive = useCallback(async (userId, token, cid) => {
     setLoading(true)
@@ -110,11 +135,28 @@ export default function App() {
           getUsers(broadcasterIds, token, cid),
         ])
         setStreamsByUserId(Object.fromEntries(streams.map((s) => [s.user_id, s])))
-        setAvatarsByUserId(Object.fromEntries(users.map((u) => [u.id, u.profile_image_url])))
+        const avatarMap = Object.fromEntries(users.map((u) => [u.id, u.profile_image_url]))
+        setAvatarsByUserId(avatarMap)
+
+        if (notificationsEnabledRef.current && previousLiveIdsRef.current) {
+          const newlyLive = streams.filter((s) => !previousLiveIdsRef.current.has(s.user_id))
+          for (const s of newlyLive) {
+            const notif = new Notification(`${s.user_name} just went live`, {
+              body: s.title,
+              icon: avatarMap[s.user_id],
+            })
+            notif.onclick = () => {
+              window.open(`https://twitch.tv/${s.user_login}`, '_blank')
+            }
+          }
+        }
+        previousLiveIdsRef.current = new Set(streams.map((s) => s.user_id))
       } else {
         setStreamsByUserId({})
         setAvatarsByUserId({})
+        previousLiveIdsRef.current = new Set()
       }
+      setLastUpdated(new Date())
     } catch (err) {
       setError(err.message)
     } finally {
@@ -169,11 +211,35 @@ export default function App() {
     setUser(null)
     setChannels([])
     setStreamsByUserId({})
+    setLastUpdated(null)
+    previousLiveIdsRef.current = null
   }
 
   const handleSaveClientId = (id) => {
     setStoredClientId(id)
     setClientId(id)
+  }
+
+  const handleToggleNotifications = async () => {
+    if (!('Notification' in window)) {
+      setError('Notifications are not supported in this browser.')
+      return
+    }
+    if (notificationsEnabled) {
+      setNotificationsEnabled(false)
+      localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, 'false')
+      return
+    }
+    let permission = Notification.permission
+    if (permission === 'default') {
+      permission = await Notification.requestPermission()
+    }
+    if (permission === 'granted') {
+      setNotificationsEnabled(true)
+      localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, 'true')
+    } else {
+      setError('Notification permission was denied. Enable it in your browser’s site settings to use this.')
+    }
   }
 
   if (!clientId) {
@@ -199,10 +265,19 @@ export default function App() {
     )
   }
 
-  const live = channels
-    .filter((c) => streamsByUserId[c.broadcaster_id])
+  const query = search.trim().toLowerCase()
+  const matchesSearch = (c) => !query || c.broadcaster_name.toLowerCase().includes(query)
+
+  const liveAll = channels.filter((c) => streamsByUserId[c.broadcaster_id])
+  const gameOptions = [...new Set(liveAll.map((c) => streamsByUserId[c.broadcaster_id].game_name).filter(Boolean))].sort()
+
+  const live = liveAll
+    .filter(matchesSearch)
+    .filter((c) => !gameFilter || streamsByUserId[c.broadcaster_id].game_name === gameFilter)
     .sort((a, b) => streamsByUserId[b.broadcaster_id].viewer_count - streamsByUserId[a.broadcaster_id].viewer_count)
-  const offline = channels.filter((c) => !streamsByUserId[c.broadcaster_id])
+  const offline = channels.filter((c) => !streamsByUserId[c.broadcaster_id]).filter(matchesSearch)
+
+  const showSkeletons = loading && !channels.length
 
   return (
     <div className="app">
@@ -210,6 +285,9 @@ export default function App() {
         <h1>Twitch Following Live</h1>
         <div className="header-actions">
           <span className="logged-in-as">{user.login}</span>
+          <button onClick={handleToggleNotifications}>
+            {notificationsEnabled ? '🔔 Notifications on' : '🔕 Enable notifications'}
+          </button>
           <button onClick={handleRefresh} disabled={loading}>
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
@@ -218,9 +296,48 @@ export default function App() {
       </header>
 
       {error && <p className="error">{error}</p>}
-      {loading && !channels.length && <p>Loading your followed channels…</p>}
+
+      {channels.length > 0 && (
+        <div className="toolbar">
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Search channels…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {gameOptions.length > 0 && (
+            <select value={gameFilter} onChange={(e) => setGameFilter(e.target.value)}>
+              <option value="">All categories</option>
+              {gameOptions.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+          )}
+          {lastUpdated && (
+            <span className="last-updated">Updated {lastUpdated.toLocaleTimeString()}</span>
+          )}
+        </div>
+      )}
+
+      {showSkeletons && (
+        <section>
+          <h2>Loading your followed channels…</h2>
+          <div className="channel-grid">
+            {Array.from({ length: 6 }, (_, i) => (
+              <SkeletonCard key={i} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {!loading && !channels.length && !error && <p>You aren't following anyone yet.</p>}
+
+      {!showSkeletons && channels.length > 0 && live.length === 0 && offline.length === 0 && (
+        <p>No channels match your filters.</p>
+      )}
 
       {live.length > 0 && (
         <section>
