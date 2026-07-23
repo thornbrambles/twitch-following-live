@@ -7,11 +7,14 @@ import {
   getLiveStreams,
   getStoredClientId,
   getStoredToken,
+  getUsers,
   login,
   logout,
   setStoredClientId,
   validateToken,
 } from './twitch'
+
+const REFRESH_INTERVAL_MS = 60_000
 import './App.css'
 
 function ClientIdForm({ onSave }) {
@@ -46,7 +49,7 @@ function ClientIdForm({ onSave }) {
   )
 }
 
-function StreamCard({ channel, stream }) {
+function StreamCard({ channel, stream, avatarUrl }) {
   const thumbnail = stream
     ? stream.thumbnail_url.replace('{width}', '320').replace('{height}', '180')
     : null
@@ -62,7 +65,9 @@ function StreamCard({ channel, stream }) {
         {stream ? (
           <img className="thumbnail" src={thumbnail} alt={stream.title} loading="lazy" />
         ) : (
-          <div className="thumbnail thumbnail-offline" />
+          <div className="thumbnail thumbnail-offline">
+            {avatarUrl && <img className="offline-avatar" src={avatarUrl} alt="" loading="lazy" />}
+          </div>
         )}
         {stream && <span className="live-badge">LIVE</span>}
       </div>
@@ -88,6 +93,7 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [channels, setChannels] = useState([])
   const [streamsByUserId, setStreamsByUserId] = useState({})
+  const [avatarsByUserId, setAvatarsByUserId] = useState({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -98,14 +104,16 @@ export default function App() {
       const followed = await getFollowedChannels(userId, token, cid)
       setChannels(followed)
       if (followed.length) {
-        const streams = await getLiveStreams(
-          followed.map((c) => c.broadcaster_id),
-          token,
-          cid,
-        )
+        const broadcasterIds = followed.map((c) => c.broadcaster_id)
+        const [streams, users] = await Promise.all([
+          getLiveStreams(broadcasterIds, token, cid),
+          getUsers(broadcasterIds, token, cid),
+        ])
         setStreamsByUserId(Object.fromEntries(streams.map((s) => [s.user_id, s])))
+        setAvatarsByUserId(Object.fromEntries(users.map((u) => [u.id, u.profile_image_url])))
       } else {
         setStreamsByUserId({})
+        setAvatarsByUserId({})
       }
     } catch (err) {
       setError(err.message)
@@ -139,6 +147,17 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId])
+
+  useEffect(() => {
+    if (!user) return undefined
+
+    const id = setInterval(() => {
+      const token = getStoredToken()
+      if (token) loadFollowedAndLive(user.user_id, token, clientId)
+    }, REFRESH_INTERVAL_MS)
+
+    return () => clearInterval(id)
+  }, [user, clientId, loadFollowedAndLive])
 
   const handleRefresh = () => {
     const token = getStoredToken()
@@ -180,7 +199,9 @@ export default function App() {
     )
   }
 
-  const live = channels.filter((c) => streamsByUserId[c.broadcaster_id])
+  const live = channels
+    .filter((c) => streamsByUserId[c.broadcaster_id])
+    .sort((a, b) => streamsByUserId[b.broadcaster_id].viewer_count - streamsByUserId[a.broadcaster_id].viewer_count)
   const offline = channels.filter((c) => !streamsByUserId[c.broadcaster_id])
 
   return (
@@ -217,7 +238,12 @@ export default function App() {
           <h2>Offline ({offline.length})</h2>
           <div className="channel-grid">
             {offline.map((c) => (
-              <StreamCard key={c.broadcaster_id} channel={c} stream={null} />
+              <StreamCard
+                key={c.broadcaster_id}
+                channel={c}
+                stream={null}
+                avatarUrl={avatarsByUserId[c.broadcaster_id]}
+              />
             ))}
           </div>
         </section>

@@ -149,3 +149,16 @@ export async function getLiveStreams(userIds, token, clientId) {
   }
   return streams
 }
+
+export async function getUsers(userIds, token, clientId) {
+  const users = []
+  for (const batch of chunk(userIds, 100)) {
+    const data = await helixGet('/users', {
+      token,
+      clientId,
+      params: { id: batch },
+    })
+    users.push(...data.data)
+  }
+  return users
+}

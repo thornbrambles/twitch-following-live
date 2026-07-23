@@ -143,6 +143,20 @@ section h2 {
   display: block;
 }
 
+.thumbnail-offline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.offline-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  opacity: 0.85;
+}
+
 .channel-info {
   display: flex;
   flex-direction: column;
